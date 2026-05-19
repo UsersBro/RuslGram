@@ -98,7 +98,7 @@
         .add-contact-btn { background: var(--primary); color: white; border: none; border-radius: 50%; width: 32px; height: 32px; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
         .add-contact-btn:hover { background: var(--primary-hover); }
 
-        /* Окно Аудиозвонка (Компактное) */
+        /* Окно Аудиозвонка */
         #call-overlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(20, 20, 20, 0.95); z-index: 500; flex-direction: column; justify-content: center; align-items: center; color: white; animation: popIn 0.3s ease-out; }
         #call-controls { margin-top: 25px; display: flex; gap: 15px; z-index: 510; }
         .call-control-btn { width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer; font-size: 22px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 10px rgba(0,0,0,0.2); transition: transform 0.1s; }
@@ -109,7 +109,6 @@
         #accept-call-btn { background: var(--success); color: white; width: 130px; border-radius: 26px; font-weight: bold; font-size: 15px; display: none; }
         #end-call-btn { background: var(--danger); color: white; width: 130px; border-radius: 26px; font-weight: bold; font-size: 15px; }
         
-        /* Скрываем сам плеер, звук будет идти в фоне */
         audio.hidden-audio { display: none; }
     </style>
 </head>
@@ -237,6 +236,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
         import { getFirestore, collection, doc, setDoc, getDoc, getDocs, updateDoc, deleteDoc, query, where, addDoc, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
+        // === ОБЯЗАТЕЛЬНО ВСТАВЬ ТУТ СВОЙ CONFIG FIREBASE ===
         const firebaseConfig = {
             apiKey: "AIzaSyBGQCbfsbRilYFBNXBX56LDv9jrKN7Ro30",
             authDomain: "ruslgram-c273c.firebaseapp.com",
@@ -259,12 +259,11 @@
         let replyingTo = null;
         let base64Avatar = null;
 
-        // Переменные WebRTC
+        // WebRTC
         let localStream = null;
         let peerConnection = null;
         let activeCallId = null; 
         let isCaller = false;
-
         const iceServersConfig = { iceServers: [{ urls: ["stun:stun1.l.google.com:19302", "stun:stun2.l.google.com:19302"] }] };
 
         const messagesDiv = document.getElementById('messages');
@@ -493,14 +492,11 @@
         // НАСТОЯЩИЙ И БЕЗОПАСНЫЙ WEBRTC АУДИО-ДВИЖОК
         // ========================================================
 
-        // Слушатель входящих звонков
-        // ИСПРАВЛЕНИЕ: Чтобы не падать из-за индексов Firebase, ищем только по receiverId
         function listenToIncomingCalls() {
             const q = query(collection(db, "calls"), where("receiverId", "==", currentUserData.uid));
             onSnapshot(q, (snapshot) => {
                 snapshot.docChanges().forEach((change) => {
                     const callData = change.doc.data();
-                    // Фильтруем статус внутри JS, чтобы избежать ошибки "Missing Index" в базе
                     if ((change.type === "added" || change.type === "modified") && callData.status === "dialing" && !activeCallId) {
                         activeCallId = change.doc.id;
                         isCaller = false;
@@ -543,13 +539,18 @@
             sndDialing.currentTime = 0; sndDialing.play().catch(()=>{});
 
             try {
-                // ИСПРАВЛЕНИЕ: ТОЛЬКО АУДИО (Голос)
-                localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
-
                 peerConnection = new RTCPeerConnection(iceServersConfig);
-                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
 
-                // Получение аудио от собеседника в невидимый плеер
+                // Пытаемся взять микрофон. Если отказ - всё равно звоним!
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                } catch (mediaErr) {
+                    console.warn("Нет микрофона у звонящего:", mediaErr);
+                    peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+                    customAlert("Доступ к микрофону запрещен. Вы будете только слышать собеседника.");
+                }
+
                 peerConnection.ontrack = (event) => {
                     remoteAudio.srcObject = event.streams[0];
                 };
@@ -565,7 +566,7 @@
                 await setDoc(callRef, {
                     callerId: currentUserData.uid,
                     callerName: currentUserData.name,
-                    callerAvatar: currentUserData.avatar,
+                    callerAvatar: currentUserData.avatar || null,
                     receiverId: currentChatUser.uid,
                     chatRoomId: currentChatId,
                     status: 'dialing',
@@ -575,9 +576,9 @@
                 trackCallStatus();
 
             } catch (err) {
-                console.error(err);
+                console.error("Ошибка при создании вызова:", err);
                 closeCallSession();
-                customAlert("Ошибка доступа к микрофону!");
+                customAlert("Ошибка соединения!");
             }
         });
 
@@ -592,10 +593,17 @@
                 const callSnapshot = await getDoc(callRef);
                 const callData = callSnapshot.data();
 
-                // ИСПРАВЛЕНИЕ: ТОЛЬКО АУДИО
-                localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
                 peerConnection = new RTCPeerConnection(iceServersConfig);
-                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+                // Пытаемся взять микрофон. Если отказ - всё равно принимаем!
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                } catch (mediaErr) {
+                    console.warn("Нет микрофона у отвечающего:", mediaErr);
+                    peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+                    customAlert("Вы подключились без микрофона. Собеседник вас не услышит.");
+                }
 
                 peerConnection.ontrack = (event) => {
                     remoteAudio.srcObject = event.streams[0];
@@ -626,8 +634,8 @@
                 callStatus.textContent = `Идёт разговор...`;
 
             } catch (err) {
-                console.error(err);
-                updateDoc(doc(db, "calls", activeCallId), { status: 'ended' });
+                console.error("Ошибка при ответе:", err);
+                updateDoc(doc(db, "calls", activeCallId), { status: 'ended' }).catch(()=>{});
                 closeCallSession();
             }
         });
